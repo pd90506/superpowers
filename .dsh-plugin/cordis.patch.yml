@@ -1,0 +1,12 @@
+# Superpowers bundle layer for DeepSeek Harness.
+# This file is the `dsh.bundle.patch` layer referenced by package.json#dsh.bundle.patch.
+# Layer semantics: a YAML array of row verbs; `insert` adds plugin rows to the
+# composed config. Later layers override a row by `id` (whole-row replacement).
+- insert:
+    # `id`: stable row identifier a later layer can target to disable or reconfigure.
+    - id: superpowers
+      # `name`: the module the loader imports. This targets the DSH entry file
+      # explicitly rather than the bare package name, because package.json#main
+      # is already claimed by the OpenCode adapter — a bare `superpowers` would
+      # load that plugin instead of this one.
+      name: superpowers/.dsh-plugin/index.js
