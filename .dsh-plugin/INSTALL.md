@@ -1,7 +1,7 @@
 # Superpowers for DeepSeek Harness (DSH)
 
 Installs all 14 Superpowers skills into a DSH profile and injects the
-`using-superpowers` bootstrap into every session's system prompt.
+`using-superpowers` bootstrap into every session as a user-role message.
 
 ## Install
 
@@ -32,18 +32,32 @@ Expected:
 | Contribution | Seam | Effect |
 |---|---|---|
 | 14 skills | `ctx.skills.register()` | Each `skills/<name>/SKILL.md` enters the session catalog with its own directory as `resourceBase`, so companion files resolve. |
-| Bootstrap | `ctx.systemPrompt.section()` | `using-superpowers` is injected at `HARNESS_SOURCE - 1`, plus a DSH tool-name mapping. |
+| Bootstrap | `ctx.on('agent/pre-step')` | `using-superpowers` plus a DSH tool-name mapping is appended to the step as a **user-role** message. |
 
-Both contributions go through `ctx.effect()`, so unloading the plugin removes
-them cleanly.
+Both contributions are effects — `ctx.effect()` and `ctx.on()` — so unloading
+the plugin removes them cleanly.
 
-### Why a system-prompt section
+### Why a user-role message at `agent/pre-step`
 
 Superpowers auto-triggers on other harnesses through a `SessionStart` hook
-(`hooks/hooks.json`, Claude Code) or a message transform (`.opencode`). DSH has
-neither, but it does have a first-class prompt-assembly registry. Injecting the
-bootstrap there is the DSH equivalent: it is what makes skills fire on their own
-rather than sit on disk unused.
+(`hooks/hooks.json`, Claude Code) or a message transform (`.opencode`, `.pi`).
+DSH has neither, but `agent/pre-step` lets a plugin append messages to the step
+on its way in — the same seam DSH's own `dsh-tool-skill` uses for the skill
+catalog and the `/name` gesture.
+
+`docs/porting-to-a-new-harness.md` ("Shape B") requires a **user** message
+rather than a system one, a dedup guard, and re-injection after compaction. An
+earlier revision of this adapter used `ctx.systemPrompt.section()` instead.
+Measurement showed why that was wrong: a system-prompt section reliably fires
+skills on the first turn but decays afterwards, because nothing re-asserts it as
+the conversation grows and the section sits far above the current task.
+
+The dedup guard and the compaction re-injection are one check. `bootstrapVisible()`
+scans the session log backwards for a bootstrap this plugin injected and tests
+membership in `agent.session.surface.nodes`. Compaction leaves the event in
+history but drops it from the visible surface, so the check turns false exactly
+when the model can no longer read the bootstrap, and the next step re-injects it.
+No compaction event is needed.
 
 ### Why an explicit entry path
 

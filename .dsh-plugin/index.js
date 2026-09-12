@@ -10,19 +10,28 @@
 //      is checked out instead of depending on a configured path. Content is
 //      used verbatim — no copying, symlinking, or rewriting.
 //
-//   2. Bootstrap injection — `using-superpowers` is injected into the system
-//      prompt of every session through `ctx.systemPrompt.section()`. DSH has no
-//      SessionStart hook, so this is the seam that makes skills auto-trigger
-//      instead of sitting on disk as dead weight.
+//   2. Bootstrap injection — `using-superpowers` is injected as a user-role
+//      message at `agent/pre-step`. DSH has no SessionStart hook, so this is
+//      the seam that makes skills auto-trigger instead of sitting on disk as
+//      dead weight.
 //
-// Registration is an effect: every contribution goes through `ctx.effect()` or
-// a service disposer, so unloading the plugin removes it cleanly.
+//      The shape is prescribed by `docs/porting-to-a-new-harness.md` ("Shape
+//      B"): a *user* message rather than a system one, guarded so it is not
+//      injected twice, and re-injected once history no longer carries it. An
+//      earlier revision used `ctx.systemPrompt.section()` instead; measurement
+//      showed that shape only holds on the first turn, because nothing
+//      re-asserts a system-prompt section as the conversation grows.
+//
+// Registration is an effect: every contribution goes through `ctx.effect()`,
+// `ctx.on()`, or a service disposer, so unloading the plugin removes it
+// cleanly.
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { randomUUID } from 'node:crypto'
 
 export const name = 'superpowers'
-export const inject = ['skills', 'systemPrompt']
+export const inject = ['skills']
 
 const pluginRoot = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(pluginRoot, '..')
@@ -111,8 +120,93 @@ When skills request actions, substitute the DSH equivalents:
 Use DSH's native \`skill\` tool to load any skill by name.`
 
 /**
+ * The bootstrap text, assembled once per process.
+ * Re-reading and re-wrapping `SKILL.md` on every step would repeat the same
+ * work on a hot path, so the body is read lazily and then cached.
+ * @returns the full `<EXTREMELY_IMPORTANT>` block the model sees.
+ */
+let cachedBootstrapText
+function bootstrapText() {
+  if (cachedBootstrapText !== undefined) return cachedBootstrapText
+  const body = stripFrontmatter(
+    readFileSync(join(skillsDir, 'using-superpowers', 'SKILL.md'), 'utf8'),
+  )
+  cachedBootstrapText = `<EXTREMELY_IMPORTANT>
+You have superpowers.
+
+**The content below is your 'using-superpowers' skill — your introduction to using skills. It is ALREADY LOADED; you are currently following it. Do NOT call the \`skill\` tool to load "using-superpowers" again. For every other skill, use the \`skill\` tool.**
+
+${body}
+
+${TOOL_MAPPING}
+</EXTREMELY_IMPORTANT>`
+  return cachedBootstrapText
+}
+
+/**
+ * Recursively freeze a value, mirroring how DSH publishes its own messages.
+ * @param value - the structure to freeze in place.
+ * @returns the same value, deeply frozen.
+ */
+function deepFreeze(value) {
+  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value
+  Object.freeze(value)
+  for (const inner of Object.values(value)) deepFreeze(inner)
+  return value
+}
+
+/**
+ * Does this message source identify a bootstrap this plugin injected?
+ * `plugin` is the marker; `form` is one of DSH's fixed context forms and is
+ * not discriminating on its own.
+ * @param source - a message source from history or from the pending batch.
+ * @returns true when the message is one of ours.
+ */
+function isBootstrapSource(source) {
+  return source?.kind === 'plugin' && source.plugin === name
+}
+
+/**
+ * Build the bootstrap as a user-role message.
+ * Upstream requires a *user* message: repeated system messages inflate tokens
+ * and break some models.
+ * @returns a frozen user message carrying the bootstrap.
+ */
+function bootstrapMessage() {
+  return deepFreeze({
+    id: randomUUID(),
+    role: 'user',
+    content: [{ type: 'text', text: bootstrapText() }],
+    source: { kind: 'plugin', plugin: name, form: 'instructions' },
+  })
+}
+
+/**
+ * Is a bootstrap still visible to the model in this session?
+ * Presence in the log is not enough: compaction leaves the event in history
+ * but drops it from the visible surface, and a bootstrap the model can no
+ * longer read has to be injected again. This one check therefore serves as
+ * both the dedup guard and the post-compaction re-injection trigger.
+ * @param agent - the agent whose session log is inspected.
+ * @returns true when the model can still see a bootstrap.
+ */
+function bootstrapVisible(agent) {
+  const session = agent?.session
+  if (session === undefined) return false
+  const visible = new Set(session.surface.nodes)
+  for (let index = session.seq - 1; index >= 0; index -= 1) {
+    const event = session.eventAt(index)
+    if (event === undefined) break
+    if (event.type !== 'user/message') continue
+    if (!isBootstrapSource(event.data?.source)) continue
+    if (visible.has(event.seq)) return true
+  }
+  return false
+}
+
+/**
  * Mount the Superpowers skill root and inject the bootstrap.
- * @param ctx - Cordis context carrying the injected `skills` and `systemPrompt` services.
+ * @param ctx - Cordis context carrying the injected `skills` service.
  */
 export function apply(ctx) {
   // 1. Register every skill bundle under `skills/`. `resourceBase` points at
@@ -134,26 +228,19 @@ export function apply(ctx) {
     )
   }
 
-  const bootstrapBody = stripFrontmatter(
-    readFileSync(join(skillsDir, 'using-superpowers', 'SKILL.md'), 'utf8'),
-  )
-
-  // 2. Inject the bootstrap as a system-prompt section. HARNESS_SOURCE sits
-  //    late in the prompt, after the persona and tool docs, so the mandate to
-  //    use skills is the last instruction the model reads before the task.
-  ctx.effect(() =>
-    ctx.systemPrompt.section({
-      name: 'superpowers:bootstrap',
-      order: ctx.systemPrompt.getSectionOrder('HARNESS_SOURCE') - 1,
-      text: `<EXTREMELY_IMPORTANT>
-You have superpowers.
-
-**The content below is your 'using-superpowers' skill — your introduction to using skills. It is ALREADY LOADED; you are currently following it. Do NOT call the \`skill\` tool to load "using-superpowers" again. For every other skill, use the \`skill\` tool.**
-
-${bootstrapBody}
-
-${TOOL_MAPPING}
-</EXTREMELY_IMPORTANT>`,
-    }),
-  )
+  // 2. Inject the bootstrap as a user-role message on the way into a step.
+  //    Appending it to the decision places it in that step's message batch,
+  //    after the durable prefix and the skill catalog. Ordering against other
+  //    plugins' pre-step listeners follows their registration order, so this
+  //    is "late in the step", not a guaranteed last position.
+  ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+    // A waterfall listener owes `next()` its turn; skipping it would silently
+    // short-circuit every other contributor.
+    const decision = await next()
+    if (decision.kind === 'reject') return decision
+    signal?.throwIfAborted()
+    if (decision.messages.some((message) => isBootstrapSource(message.source))) return decision
+    if (bootstrapVisible(agent)) return decision
+    return { ...decision, messages: [...decision.messages, bootstrapMessage()] }
+  })
 }
