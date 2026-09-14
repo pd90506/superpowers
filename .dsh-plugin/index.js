@@ -104,10 +104,15 @@ function discoverSkills(root) {
 // DSH tool names differ from the Claude Code names the skills were written
 // against. Skills say "use the Task tool" or "Write the file"; without this
 // mapping the model improvises. Keep this in sync with the actual DSH tool set.
+// The Superpowers subagent prompt templates assume a child with isolated
+// context, so the mapping must name `subagent` only: `subagent_fork` seeds the
+// child with this transcript, and a child that inherits the controller's
+// dispatches, ledger writes and commits as memories takes over the controller
+// role instead of doing the one job it was dispatched for.
 const TOOL_MAPPING = `**Tool Mapping for DeepSeek Harness:**
 When skills request actions, substitute the DSH equivalents:
 - Create or update todos → \`todo_write\`
-- \`Subagent (general-purpose):\` → \`subagent\` (or \`subagent_fork\` to inherit this conversation)
+- \`Subagent (general-purpose):\` → \`subagent\` (skill templates assume an isolated child — never \`subagent_fork\`, which seeds the child with this transcript)
 - Invoke a skill → DSH's native \`skill\` tool
 - Read files → \`read\`
 - Create or replace files → \`write\`; targeted edits → \`edit\`

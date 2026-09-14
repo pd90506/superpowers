@@ -146,6 +146,29 @@ test('a fresh session receives the bootstrap as a user-role message', async () =
   assert.match(text, /Tool Mapping for DeepSeek Harness/);
 });
 
+test('the tool mapping sends skill subagent dispatches to the isolated primitive only', async () => {
+  const { handlers } = await loadPlugin();
+  const handler = preStepHandler(handlers);
+
+  const { result } = await runPreStep(handler, {
+    agent: makeAgent([]),
+    decision: enterDecision(),
+  });
+
+  const text = textOf(bootstrapMessages(result.messages)[0]);
+  const dispatchLine = text
+    .split('\n')
+    .find((line) => line.includes('`Subagent (general-purpose):`'));
+
+  assert.ok(dispatchLine, 'the mapping must define the Subagent (general-purpose) dispatch');
+  assert.match(dispatchLine, /→ `subagent`/, 'skill dispatches must go to the isolated tool');
+  assert.doesNotMatch(
+    dispatchLine,
+    /or `subagent_fork`/,
+    'a forked child inherits the controller transcript and mistakes itself for the controller',
+  );
+});
+
 test('the bootstrap is appended last so it lands nearest the task', async () => {
   const { handlers } = await loadPlugin();
   const handler = preStepHandler(handlers);
